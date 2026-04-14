@@ -272,9 +272,10 @@ make certs
   --listen :50051
 
 # Start a job (admin only)
+# Everything after "--" is the command + args
 ./jobworker-cli \
   --cert certs/admin.crt --key certs/admin.key --ca certs/ca.crt \
-  start --command "ls" --args "-la,/tmp"
+  start -- ls -la /tmp
 # Output: job_id: "550e8400-e29b-41d4-a716-446655440000"
 
 # Stream output (admin or viewer)
@@ -310,7 +311,7 @@ make certs
 # Viewer attempting to start (denied)
 ./jobworker-cli \
   --cert certs/viewer.crt --key certs/viewer.key --ca certs/ca.crt \
-  start --command "echo" --args "hello"
+  start -- echo hello
 # error: permission denied: role "viewer" cannot call Start
 ```
 
