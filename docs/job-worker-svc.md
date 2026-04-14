@@ -59,6 +59,7 @@ This method satisfies:
 - Late joiners: Each reader starts at offset=0
 - No Polling: `sync.Cond.Wait()` truly blocks a goroutine and consumes zero CPU
 - Independent reader: Each reader has their own offset
+- Readers can exit early without affecting the underlying job or other active readers
 - Binary safe: Everything is `[]byte` e2e
 
 Some considerations:
@@ -94,6 +95,131 @@ The alternative considered was `cmd.Process.Kill()`, but that can cause child pr
 
 All state transitions here are protected by `sync.RWMutex`, which allows for concurrent status reads.
 Transitions here are validated as well. Example: Cannot go from Completed to Running.
+
+### Library API
+
+The library exposes a Go API with no knowledge of gRPC, TLS, or transport. The gRPC server is a thin wrapper that maps RPCs to these calls.
+
+#### ProcessExecutor Interface
+
+The Worker manager doesn't know how processes are launched or killed and delegates it to this interface.
+
+```go
+// ProcessExecutor is a layer that hides the details of how processes are started
+// Ensures the rest of the code is easy to test and easy to evolve
+type ProcessExecutor interface {
+    // Start launches the command and begins writing output to the buffer
+    // Returns immediately after the process starts
+    Start(cmd string, args []string, output *OutputBuffer) (Process, error)
+}
+
+// Process represents a running or completed OS process.
+type Process interface {
+    // Pid returns the OS process ID
+    Pid() int
+    // Wait blocks until the process exits and returns the exit code
+    // err is for OS-level failures, not for non-zero exit codes
+    // Example: A process that exits with code 1 returns exitCode=1, err=nil
+    Wait() (exitCode int, err error)
+    // Kill terminates the process and all its children
+    Kill() error
+}
+```
+
+#### OutputBuffer
+
+`OutputBuffer` is a shared container that stores bytes of output as they arrive. It is append-only and implements io.Writer.
+
+```go
+type OutputBuffer struct { /* sync.Mutex, sync.Cond, []byte, closed bool */ }
+
+// Write appends data and wakes all waiting readers
+func (b *OutputBuffer) Write(p []byte) (n int, err error)
+
+// NewReader returns a new Reader starting at offset 0
+func (b *OutputBuffer) NewReader() *Reader
+
+// Close marks the buffer as complete
+func (b *OutputBuffer) Close()
+```
+
+#### OutputReader and Reader
+
+```go
+// OutputReader is the interface exposed through WorkerService
+// The gRPC layer depends on this
+type OutputReader interface {
+    // Next blocks until the next chunk of output is available, the buffer
+    // is closed, or the context is cancelled
+    Next(ctx context.Context) ([]byte, error)
+}
+
+// Reader is the concrete implementation of OutputReader
+//  It provides a per-client view into an OutputBuffer, tracking its own offset
+type Reader struct { /* buffer *OutputBuffer, offset int */ }
+
+func (r *Reader) Next(ctx context.Context) ([]byte, error)
+```
+
+#### Worker Manager
+
+The Worker manager is responsible for creating a UUID for the jobID.
+
+```go
+// StartSpec contains everything needed to create a job
+type StartSpec struct {
+    Command string
+    Args    []string
+    Owner   string   // CN of the client that created the job
+}
+
+// WorkerService defines the operations the gRPC layer depends on
+type WorkerService interface {
+    Start(ctx context.Context, spec StartSpec) (jobID string, err error)
+    Stop(ctx context.Context, jobID string) error
+    Status(ctx context.Context, jobID string) (JobInfo, error)
+    List(ctx context.Context) ([]JobInfo, error)
+    StreamOutput(ctx context.Context, jobID string) (OutputReader, error)
+}
+
+type Worker struct { /* sync.RWMutex, map[string]*Job, ProcessExecutor */ }
+
+// Start creates a new job, executes the command, and returns the job ID
+func (w *Worker) Start(ctx context.Context, spec StartSpec) (jobID string, err error)
+
+// Stop kills a running job and all its children
+// Returns an error if the job is not in the Running state
+func (w *Worker) Stop(ctx context.Context, jobID string) error
+
+// Status returns a snapshot of the job's current state and metadata
+func (w *Worker) Status(ctx context.Context, jobID string) (JobInfo, error)
+
+// List returns a snapshot of all jobs state and metadata
+func (w *Worker) List(ctx context.Context) ([]JobInfo, error)
+
+// StreamOutput returns an OutputReader for the job's output buffer
+// The caller reads from offset 0 regardless of when the job started or
+// whether it has already completed
+func (w *Worker) StreamOutput(ctx context.Context, jobID string) (OutputReader, error)
+```
+
+#### JobInfo
+
+```go
+// JobInfo is a read-only value snapshot returned by Status and List
+type JobInfo struct {
+    ID         string
+    Command    string
+    Args       []string
+    State      JobState    // Running, Completed, Failed, Stopped
+    ExitCode   *int
+    Error      string
+    Owner      string      // CN of the client that created the job
+    CreatedAt  time.Time
+    StartedAt  time.Time 
+    FinishedAt time.Time
+}
+```
 
 ### Configuration
 
@@ -163,14 +289,17 @@ message StatusResponse {
   // Readable error messages
   string error = 6;         
 
+  // CN of the client that created the job
+  string owner = 7;
+
   // Job created using Unix timestamp seconds
-  int64 created_at = 7;  
+  int64 created_at = 8;  
 
   // Job started using Unix timestamp seconds    
-  int64 started_at = 8;
+  int64 started_at = 9;
 
   // Job finished using Unix timestamp seconds
-  int64 finished_at = 9;
+  int64 finished_at = 10;
 }
 
 enum JobState {
@@ -217,7 +346,7 @@ message OutputChunk {
 
 Only TLS 1.3 connections are allowed. In Go, TLS 1.3 already uses only modern and secure encryption options by default. It also keeps things simple. 
 
-Every Client should also present a valid certificate using `tls.RequireAndVerifyClientCert` to prevent anonymous client connections.
+The server is configured with `tls.RequireAndVerifyClientCert` so every client must present a valid certificate, preventing anonymous client connections.
 
 ### Authentication
 
@@ -260,6 +389,28 @@ Also, job record of the client who started the job is recorded, but all admins c
 
 ## CLI UX
 
+The CLI resolves client certificates in the order of precedence: 
+- Explicit flags
+- Env variables
+- default paths
+
+This means that certs can be configured once and omitted from subsequent commands:
+
+```bash
+# Option 1: Environment variables (set once per shell session)
+export JOBWORKER_CERT=certs/admin.crt
+export JOBWORKER_KEY=certs/admin.key
+export JOBWORKER_CA=certs/ca.crt
+
+# Option 2: Default paths (zero config after initial setup)
+mkdir -p ~/.jobworker/certs
+cp certs/admin.crt ~/.jobworker/certs/client.crt
+cp certs/admin.key ~/.jobworker/certs/client.key
+cp certs/ca.crt ~/.jobworker/certs/ca.crt
+```
+
+### Examples
+
 ```bash
 # Generate test certificates
 make certs
@@ -278,16 +429,14 @@ make certs
   start -- ls -la /tmp
 # Output: job_id: "550e8400-e29b-41d4-a716-446655440000"
 
+# Remaining examples assume env vars or default paths are configured 
+
 # Stream output (admin or viewer)
-./jobworker-cli \
-  --cert certs/viewer.crt --key certs/viewer.key --ca certs/ca.crt \
-  stream 550e8400-e29b-41d4-a716-446655440000
+./jobworker-cli stream 550e8400-e29b-41d4-a716-446655440000
 # Output: (raw process stdout+stderr streamed to terminal)
 
 # Query job status
-./jobworker-cli \
-  --cert certs/admin.crt --key certs/admin.key --ca certs/ca.crt \
-  status 550e8400-e29b-41d4-a716-446655440000
+./jobworker-cli status 550e8400-e29b-41d4-a716-446655440000
 # Output:
 #   ID:        550e8400-e29b-41d4-a716-446655440000
 #   Command:   ls -la /tmp
@@ -295,20 +444,16 @@ make certs
 #   Exit Code: 0
 
 # List all jobs
-./jobworker-cli \
-  --cert certs/viewer.crt --key certs/viewer.key --ca certs/ca.crt \
-  list
+./jobworker-cli list
 # Output:
 #   ID          COMMAND       STATE       EXIT CODE
 #   550e8400    ls -la /tmp   COMPLETED   0
 #   7c9e2f10    bash -c ...   RUNNING     -
 
 # Stop a running job (admin only)
-./jobworker-cli \
-  --cert certs/admin.crt --key certs/admin.key --ca certs/ca.crt \
-  stop 7c9e2f10-...
+./jobworker-cli stop 550e8400-e29b-41d4-a716-446655440000
 
-# Viewer attempting to start (denied)
+# Viewer attempting to start (denied: using viewer certs via env vars)
 ./jobworker-cli \
   --cert certs/viewer.crt --key certs/viewer.key --ca certs/ca.crt \
   start -- echo hello
