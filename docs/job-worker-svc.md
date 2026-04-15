@@ -120,7 +120,7 @@ type Process interface {
     // Wait blocks until the process exits and returns the exit code
     // err is for OS-level failures, not for non-zero exit codes
     // Example: A process that exits with code 1 returns exitCode=1, err=nil
-    Wait() (exitCode int, err error)
+    Wait() (int, error)
     // Kill terminates the process and all its children
     Kill() error
 }
@@ -134,7 +134,7 @@ type Process interface {
 type OutputBuffer struct { /* sync.Mutex, sync.Cond, []byte, closed bool */ }
 
 // Write appends data and wakes all waiting readers
-func (b *OutputBuffer) Write(p []byte) (n int, err error)
+func (b *OutputBuffer) Write(p []byte) (int, error)
 
 // NewReader returns a new Reader starting at offset 0
 func (b *OutputBuffer) NewReader() *Reader
@@ -173,19 +173,10 @@ type StartSpec struct {
     Owner   string   // CN of the client that created the job
 }
 
-// WorkerService defines the operations the gRPC layer depends on
-type WorkerService interface {
-    Start(ctx context.Context, spec StartSpec) (jobID string, err error)
-    Stop(ctx context.Context, jobID string) error
-    Status(ctx context.Context, jobID string) (JobInfo, error)
-    List(ctx context.Context) ([]JobInfo, error)
-    StreamOutput(ctx context.Context, jobID string) (OutputReader, error)
-}
-
 type Worker struct { /* sync.RWMutex, map[string]*Job, ProcessExecutor */ }
 
 // Start creates a new job, executes the command, and returns the job ID
-func (w *Worker) Start(ctx context.Context, spec StartSpec) (jobID string, err error)
+func (w *Worker) Start(ctx context.Context, spec StartSpec) (string, error)
 
 // Stop kills a running job and all its children
 // Returns an error if the job is not in the Running state
@@ -218,6 +209,25 @@ type JobInfo struct {
     CreatedAt  time.Time
     StartedAt  time.Time 
     FinishedAt time.Time
+}
+```
+
+#### Relationship to gRPC Layer
+
+The gRPC server takes a `WorkerService` interface and acts as a thin adapter:
+
+```go
+// WorkerService defines the operations the gRPC layer depends on
+type WorkerService interface {
+    Start(ctx context.Context, spec StartSpec) (string, error)
+    Stop(ctx context.Context, jobID string) error
+    Status(ctx context.Context, jobID string) (JobInfo, error)
+    List(ctx context.Context) ([]JobInfo, error)
+    StreamOutput(ctx context.Context, jobID string) (OutputReader, error)
+}
+
+type Server struct {
+    worker WorkerService  // interface, not concrete *Worker
 }
 ```
 
