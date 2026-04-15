@@ -131,16 +131,16 @@ type Process interface {
 `OutputBuffer` is a shared container that stores bytes of output as they arrive. It is append-only and implements io.Writer.
 
 ```go
-type OutputBuffer struct { /* sync.Mutex, sync.Cond, []byte, closed bool */ }
+type outputBuffer struct { /* sync.Mutex, sync.Cond, []byte, closed bool */ }
 
 // Write appends data and wakes all waiting readers
-func (b *OutputBuffer) Write(p []byte) (int, error)
+func (b *outputBuffer) Write(p []byte) (int, error)
 
 // NewReader returns a new Reader starting at offset 0
-func (b *OutputBuffer) NewReader() *Reader
+func (b *outputBuffer) NewReader() *Reader
 
 // Close marks the buffer as complete
-func (b *OutputBuffer) Close()
+func (b *outputBuffer) Close()
 ```
 
 #### OutputReader and Reader
@@ -156,9 +156,9 @@ type OutputReader interface {
 
 // Reader is the concrete implementation of OutputReader
 //  It provides a per-client view into an OutputBuffer, tracking its own offset
-type Reader struct { /* buffer *OutputBuffer, offset int */ }
+type reader struct { /* buffer *OutputBuffer, offset int */ }
 
-func (r *Reader) Next(ctx context.Context) ([]byte, error)
+func (r *reader) Next(ctx context.Context) ([]byte, error)
 ```
 
 #### Worker Manager
