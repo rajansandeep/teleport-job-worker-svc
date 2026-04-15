@@ -76,7 +76,7 @@ Alternatives considered:
 
 ### Process termination
 
-To handle processes, `SysProcAttr.Setpgid = true` would create a new process group. On Stop, send SIGKILL to the entire hroup using `syscall.Kill(-pgid, SIGKILL)`. 
+To handle processes, `SysProcAttr.Setpgid = true` would create a new process group. On Stop, send SIGKILL to the entire group using `syscall.Kill(-pgid, SIGKILL)`. This is a best-effort cleanup mechanism. It reliably terminates the main process and any descendants that remain in the original process group. 
 To prevent `Wait()` from hanging, `cmd.WaitDelay` will be used.
 
 `cmd.Wait()` blocks until the process exits and all I/O copying completes. `cmd.WaitDelay` forces pipe closure after the process exits. Without this, there can be a situation where a stopped job can hang the goroutine forever.
@@ -100,32 +100,6 @@ Transitions here are validated as well. Example: Cannot go from Completed to Run
 
 The library exposes a Go API with no knowledge of gRPC, TLS, or transport. The gRPC server is a thin wrapper that maps RPCs to these calls.
 
-#### ProcessExecutor Interface
-
-The Worker manager doesn't know how processes are launched or killed and delegates it to this interface.
-
-```go
-// ProcessExecutor is a layer that hides the details of how processes are started
-// Ensures the rest of the code is easy to test and easy to evolve
-type ProcessExecutor interface {
-    // Start launches the command and begins writing output to the buffer
-    // Returns immediately after the process starts
-    Start(cmd string, args []string, output io.Writer) (Process, error)
-}
-
-// Process represents a running or completed OS process.
-type Process interface {
-    // Pid returns the OS process ID
-    Pid() int
-    // Wait blocks until the process exits and returns the exit code
-    // err is for OS-level failures, not for non-zero exit codes
-    // Example: A process that exits with code 1 returns exitCode=1, err=nil
-    Wait() (int, error)
-    // Kill terminates the process and all its children
-    Kill() error
-}
-```
-
 #### OutputBuffer
 
 `OutputBuffer` is a shared container that stores bytes of output as they arrive. It is append-only and implements io.Writer.
@@ -143,40 +117,62 @@ func (b *outputBuffer) NewReader() *Reader
 func (b *outputBuffer) Close()
 ```
 
-#### OutputReader and Reader
+#### Reader
+
+`Reader` implements `io.ReadCloser`. The `Read(p []byte)` API. It yields bounded chunks (the caller controls the buffer size).
+`io.Reader` does not have a built-in way to cancel a blocked read, so it is wired through `Close()`:
 
 ```go
-// OutputReader is the interface exposed through WorkerService
-// The gRPC layer depends on this
-type OutputReader interface {
-    // Next blocks until the next chunk of output is available, the buffer
-    // is closed, or the context is cancelled
-    Next(ctx context.Context) ([]byte, error)
-}
-
-// Reader is the concrete implementation of OutputReader
-//  It provides a per-client view into an OutputBuffer, tracking its own offset
-type reader struct { /* buffer *OutputBuffer, offset int */ }
-
-func (r *reader) Next(ctx context.Context) ([]byte, error)
+go func() { <-ctx.Done(); reader.Close() }()
 ```
 
-#### Worker Manager
-
-The Worker manager is responsible for creating a UUID for the jobID.
+`Close()` sets a flag and calls `Cond.Broadcast()`, waking any blocked `Read`, which then observes the closed flag and returns `io.EOF`.
 
 ```go
-// StartSpec contains everything needed to create a job
-type StartSpec struct {
-    Command string
-    Args    []string
-    Owner   string   // CN of the client that created the job
-}
+// reader is the implementation returned as io.ReadCloser
+// It provides a per-client view into an OutputBuffer, tracking its own offset
+type reader struct { /* buffer *OutputBuffer, offset int, closed bool */ }
 
-type Worker struct { /* sync.RWMutex, map[string]*Job, ProcessExecutor */ }
+// Read blocks on sync.Cond until data is available, the buffer is closed
+// upstream, or the reader itself is closed
+// Chunk size is bounded by len(p)
+func (r *reader) Read(p []byte) (n int, err error)
+
+// Close unblocks any pending Read, which returns io.EOF
+func (r *reader) Close() error
+```
+
+#### Job
+
+`Job` is the internal record the Worker holds for each job.
+
+```go
+type job struct {
+    mu         sync.RWMutex
+    id         string
+    command    string
+    args       []string
+    state      JobState
+    exitCode   *int
+    errMsg     string
+    startedAt  time.Time
+    finishedAt time.Time
+    buffer     *OutputBuffer
+    cmd        *exec.Cmd 
+}
+```
+
+#### Worker
+
+`Worker` is the in-memory registry and lifecycle manager for every job the library has launched.
+It is the in-memory coordinator for all jobs started by the library. It stores jobs by ID (the worker creates a UUID for each job), starts and stops processes, tracks each job’s lifecycle as it moves from running to a terminal state, and returns read-only snapshots for status APIs.
+It also manages each job’s shared stdout/stderr buffer and gives every output consumer its own reader into that buffer. This means clients can stream output independently: a slow reader does not block other readers, and a client that joins late can still replay output from the beginning.
+
+```go
+type Worker struct { /* sync.RWMutex, map[string]*job */ }
 
 // Start creates a new job, executes the command, and returns the job ID
-func (w *Worker) Start(ctx context.Context, spec StartSpec) (string, error)
+func (w *Worker) Start(ctx context.Context, cmd string, args []string) (string, error)
 
 // Stop kills a running job and all its children
 // Returns an error if the job is not in the Running state
@@ -185,19 +181,16 @@ func (w *Worker) Stop(ctx context.Context, jobID string) error
 // Status returns a snapshot of the job's current state and metadata
 func (w *Worker) Status(ctx context.Context, jobID string) (JobInfo, error)
 
-// List returns a snapshot of all jobs state and metadata
-func (w *Worker) List(ctx context.Context) ([]JobInfo, error)
-
-// StreamOutput returns an OutputReader for the job's output buffer
+// StreamOutput returns an io.ReadCloser for the job's output buffer
 // The caller reads from offset 0 regardless of when the job started or
 // whether it has already completed
-func (w *Worker) StreamOutput(ctx context.Context, jobID string) (OutputReader, error)
+func (w *Worker) StreamOutput(ctx context.Context, jobID string) (io.ReadCloser, error)
 ```
 
 #### JobInfo
 
 ```go
-// JobInfo is a read-only value snapshot returned by Status and List
+// JobInfo is a read-only value snapshot returned by Status
 type JobInfo struct {
     ID         string
     Command    string
@@ -205,8 +198,6 @@ type JobInfo struct {
     State      JobState    // Running, Completed, Failed, Stopped
     ExitCode   *int
     Error      string
-    Owner      string      // CN of the client that created the job
-    CreatedAt  time.Time
     StartedAt  time.Time 
     FinishedAt time.Time
 }
@@ -219,11 +210,10 @@ The gRPC server takes a `WorkerService` interface and acts as a thin adapter:
 ```go
 // WorkerService defines the operations the gRPC layer depends on
 type WorkerService interface {
-    Start(ctx context.Context, spec StartSpec) (string, error)
+    Start(ctx context.Context, cmd string, args []string) (string, error)
     Stop(ctx context.Context, jobID string) error
     Status(ctx context.Context, jobID string) (JobInfo, error)
-    List(ctx context.Context) ([]JobInfo, error)
-    StreamOutput(ctx context.Context, jobID string) (OutputReader, error)
+    StreamOutput(ctx context.Context, jobID string) (io.ReadCloser, error)
 }
 
 type Server struct {
@@ -247,9 +237,6 @@ service JobWorker {
 
   // Returns the current state and metadata of a job
   rpc Status(StatusRequest) returns (StatusResponse);
-
-  // Returns the state and metadata of all jobs
-  rpc List(ListRequest) returns (ListResponse);
 
   // Streams process output (stdout+stderr) from the start of execution
   rpc StreamOutput(StreamOutputRequest) returns (stream OutputChunk);
@@ -299,17 +286,11 @@ message StatusResponse {
   // Readable error messages
   string error = 6;         
 
-  // CN of the client that created the job
-  string owner = 7;
-
-  // Job created using Unix timestamp seconds
-  int64 created_at = 8;  
-
   // Job started using Unix timestamp seconds    
-  int64 started_at = 9;
+  int64 started_at = 7;
 
   // Job finished using Unix timestamp seconds
-  int64 finished_at = 10;
+  int64 finished_at = 8;
 }
 
 enum JobState {
@@ -318,13 +299,6 @@ enum JobState {
   JOB_STATE_COMPLETED = 2;
   JOB_STATE_FAILED = 3;
   JOB_STATE_STOPPED = 4;
-}
-
-message ListRequest {}
-
-message ListResponse {
-  // Complete status response for all jobs
-  repeated StatusResponse jobs = 1;
 }
 
 message StreamOutputRequest {
@@ -358,6 +332,13 @@ Only TLS 1.3 connections are allowed. In Go, TLS 1.3 already uses only modern an
 
 The server is configured with `tls.RequireAndVerifyClientCert` so every client must present a valid certificate, preventing anonymous client connections.
 
+### Certificate Generation
+
+For the prototype, certs are pre-generated locally on demand using `make certs`, which runs a small script to create a self-signed development PKI. This target runs a small script that creates a self-signed development PKI and writes the output to local files. These certificates are not committed to the repository and are intended only for the prototype environment. Private keys are written with mode `0600`.
+
+The certificates use ECDSA P-256 keys with 365 days validity. This keeps keys and certificates small and is a good fit for a TLS 1.3 service. Rotation and revocation are out of scope.
+
+
 ### Authentication
 
 Authentication here is handled my mTLS. The server is configured with `tls.RequireAndVerifyClientCert`:
@@ -365,14 +346,15 @@ Authentication here is handled my mTLS. The server is configured with `tls.Requi
 - Only accept client certificates that trace back to our own CA. Reject certificates issued by anyone else
 - Expiry, key usage, and chain validation are enforced by `crypto/tls` in Go
 
-For this prototype service, we identify the user using Common Name (CN) like `admin` to keep things simple. For a production service, this is not recommended and using an approach such as SAN URIs is better. 
+We identify the user using Common Name (CN) like `alice`, `bob` or `charlie` to keep things simple. 
+For the prototype, CN is assumed to be a unique identity. Handling duplicate human-readable names is out of scope.
+For a production service, this is not recommended and using an approach such as SAN URIs is better. 
 
 The service will also not support certificate revocation, but that would be something to strongly consider for production systems.
 
 ### Authorization
 
 After mTLS proves who the client is, a layer of authorization is added to determine what the client can do. 
-
 The design decision here is having a hard coded CN to role map, enforced via gRPC interceptors.
 
 Authorization Flow:
@@ -384,18 +366,18 @@ Authorization Flow:
 The design principle here is Deny by Default. Any combination not in the map is denied. 
 
 This check runs on every RPC call and not just at connection establishment. Authorization is enforced per call and not per connection as a single TLS connection can have multiple gRPC streams. 
-Both gRPC unary and stream interceptors are needed as `StreamOutput` uses the stream interceptor path, while Start/Stop/Status/List uses the unary path.
+Both gRPC unary and stream interceptors are needed as `StreamOutput` uses the stream interceptor path, while Start/Stop/Status uses the unary path.
 
 The design described above is simple as serves its purpose. A dynamic auth (RBAC, OPA/ABAC) was not chosen as it adds complexity for the service. 
 Also, job record of the client who started the job is recorded, but all admins can stop the job. An owner-only stop is not added but can be added in the future. Similarly, viewers can view any job, even if they did not create it.
 
 **Role matrix:**
 
-| Role | Start | Stop | Status | List | StreamOutput |
-|------|-------|------|--------|------|-------------|
-| admin | yes | yes | yes | yes | yes |
-| viewer | no | no | yes | yes | yes |
-| unknown | no | no | no | no | no |
+| Role | Start | Stop | Status | StreamOutput |
+|------|-------|------|--------|-------------|
+| admin | yes | yes | yes | yes |
+| viewer | no | no | yes | yes |
+| unknown | no | no | no | no |
 
 ## CLI UX
 
@@ -408,15 +390,15 @@ This means that certs can be configured once and omitted from subsequent command
 
 ```bash
 # Option 1: Environment variables (set once per shell session)
-export JOBWORKER_CERT=certs/admin.crt
-export JOBWORKER_KEY=certs/admin.key
+export JOBWORKER_CERT=certs/alice.crt
+export JOBWORKER_KEY=certs/alice.key
 export JOBWORKER_CA=certs/ca.crt
 
 # Option 2: Default paths (zero config after initial setup)
 mkdir -p ~/.jobworker/certs
-cp certs/admin.crt ~/.jobworker/certs/client.crt
-cp certs/admin.key ~/.jobworker/certs/client.key
-cp certs/ca.crt ~/.jobworker/certs/ca.crt
+cp certs/alice.crt ~/.jobworker/certs/client.crt
+cp certs/alice.key ~/.jobworker/certs/client.key
+cp certs/ca.crt    ~/.jobworker/certs/ca.crt
 ```
 
 ### Examples
@@ -435,9 +417,9 @@ make certs
 # Start a job (admin only)
 # Everything after "--" is the command + args
 ./jobworker-cli \
-  --cert certs/admin.crt --key certs/admin.key --ca certs/ca.crt \
+  --cert certs/alice.crt --key certs/alice.key --ca certs/ca.crt \
   start -- ls -la /tmp
-# Output: job_id: "550e8400-e29b-41d4-a716-446655440000"
+# Output: 550e8400-e29b-41d4-a716-446655440000
 
 # Remaining examples assume env vars or default paths are configured 
 
@@ -453,19 +435,12 @@ make certs
 #   State:     COMPLETED
 #   Exit Code: 0
 
-# List all jobs
-./jobworker-cli list
-# Output:
-#   ID          COMMAND       STATE       EXIT CODE
-#   550e8400    ls -la /tmp   COMPLETED   0
-#   7c9e2f10    bash -c ...   RUNNING     -
-
 # Stop a running job (admin only)
 ./jobworker-cli stop 550e8400-e29b-41d4-a716-446655440000
 
-# Viewer attempting to start (denied: using viewer certs via env vars)
+# Viewer attempting to start (denied: charlie maps to the viewer role)
 ./jobworker-cli \
-  --cert certs/viewer.crt --key certs/viewer.key --ca certs/ca.crt \
+  JOBWORKER_CERT=certs/charlie.crt JOBWORKER_KEY=certs/charlie.key \
   start -- echo hello
 # error: permission denied: role "viewer" cannot call Start
 ```
