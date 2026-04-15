@@ -110,7 +110,7 @@ The Worker manager doesn't know how processes are launched or killed and delegat
 type ProcessExecutor interface {
     // Start launches the command and begins writing output to the buffer
     // Returns immediately after the process starts
-    Start(cmd string, args []string, output *OutputBuffer) (Process, error)
+    Start(cmd string, args []string, output io.Writer) (Process, error)
 }
 
 // Process represents a running or completed OS process.
