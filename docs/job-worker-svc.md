@@ -399,14 +399,14 @@ This means that certs can be configured once and omitted from subsequent command
 
 ```bash
 # Option 1: Environment variables (set once per shell session)
-export JOBWORKER_CERT=certs/alice.crt
-export JOBWORKER_KEY=certs/alice.key
+export JOBWORKER_CERT=certs/admin.crt
+export JOBWORKER_KEY=certs/admin.key
 export JOBWORKER_CA=certs/ca.crt
 
 # Option 2: Default paths (zero config after initial setup)
 mkdir -p ~/.jobworker/certs
-cp certs/alice.crt ~/.jobworker/certs/client.crt
-cp certs/alice.key ~/.jobworker/certs/client.key
+cp certs/admin.crt ~/.jobworker/certs/client.crt
+cp certs/admin.key ~/.jobworker/certs/client.key
 cp certs/ca.crt    ~/.jobworker/certs/ca.crt
 ```
 
@@ -426,7 +426,7 @@ make certs
 # Start a job (admin only)
 # Everything after "--" is the command + args
 ./jobworker-cli \
-  --cert certs/alice.crt --key certs/alice.key --ca certs/ca.crt \
+  --cert certs/admin.crt --key certs/admin.key --ca certs/ca.crt \
   start -- ls -la /tmp
 # Output: 550e8400-e29b-41d4-a716-446655440000
 
@@ -447,8 +447,8 @@ make certs
 # Stop a running job (admin only)
 ./jobworker-cli stop 550e8400-e29b-41d4-a716-446655440000
 
-# Viewer attempting to start (denied: charlie maps to the viewer role)
-JOBWORKER_CERT=certs/charlie.crt JOBWORKER_KEY=certs/charlie.key ./jobworker-cli start -- echo hello
+# Viewer attempting to start (denied)
+JOBWORKER_CERT=certs/viewer.crt JOBWORKER_KEY=certs/viewer.key ./jobworker-cli start -- echo hello
 # error: permission denied: role "viewer" cannot call Start
 ```
 
