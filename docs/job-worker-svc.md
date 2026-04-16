@@ -75,7 +75,7 @@ Alternatives considered:
 
 ### Process termination
 
-To handle processes, `SysProcAttr.Setpgid = true` would create a new process group. On Stop, send SIGKILL to the entire group using `syscall.Kill(-pgid, SIGKILL)`. This is a best-effort cleanup mechanism. It reliably terminates the main process and any descendants that remain in the original process group. 
+To handle processes, `SysProcAttr.Setpgid = true` would create a new process group. On Stop, send SIGKILL to the entire group using `syscall.Kill(-pgid, SIGKILL)`. It reliably terminates the main process and any descendants that remain in the original process group and are signaled on a best-effort basis.
 To prevent `Wait()` from hanging, `cmd.WaitDelay` will be used.
 
 `cmd.Wait()` blocks until the process exits and all I/O copying completes. `cmd.WaitDelay` forces pipe closure after the process exits. Without this, there can be a situation where a stopped job can hang the goroutine forever.
@@ -143,7 +143,7 @@ func (r *reader) Close() error
 
 #### Job
 
-`Job` is the internal record the Worker holds for each job.
+`job` is the internal record the Worker holds for each job.
 
 ```go
 type job struct {
@@ -345,16 +345,26 @@ Authentication here is handled my mTLS. The server is configured with `tls.Requi
 - Only accept client certificates that trace back to our own CA. Reject certificates issued by anyone else
 - Expiry, key usage, and chain validation are enforced by `crypto/tls` in Go
 
-We identify the user using Common Name (CN) like `alice`, `bob` or `charlie` to keep things simple. 
+We use the Common Name (CN) on the client cert to represent the caller's authorization role `admin` or `viewer` to keep things simple. 
 For the prototype, CN is assumed to be a unique identity. Handling duplicate human-readable names is out of scope.
-For a production service, this is not recommended and using an approach such as SAN URIs is better. 
+For a production service, this is not recommended and using an approach such as SAN URIs is better. Production would also issue identity-based certs (example: `CN=alice`) and map identity to role separately, which supports per-user audit, individual revocation, and owner-based authorization. Those are out of scope here.
 
 The service will also not support certificate revocation, but that would be something to strongly consider for production systems.
 
 ### Authorization
 
 After mTLS proves who the client is, a layer of authorization is added to determine what the client can do. 
-The design decision here is having a hard coded CN to role map, enforced via gRPC interceptors.
+The design decision here is that the CN is the role (`admin` or `viewer`), mapped directly to permitted RPC methods and enforced via gRPC interceptors. There is no identity to role indirection because there are no per-user identities in this prototype.
+
+```go
+// method to set of CNs allowed to call it. Default deny on unknown method.
+var methodPermissions = map[string]map[role]bool{
+    "/jobworker.v1.JobWorker/Start":        {roleAdmin: true},
+    "/jobworker.v1.JobWorker/Stop":         {roleAdmin: true},
+    "/jobworker.v1.JobWorker/Status":       {roleAdmin: true, roleViewer: true},
+    "/jobworker.v1.JobWorker/StreamOutput": {roleAdmin: true, roleViewer: true},
+}
+```
 
 Authorization Flow:
 - Extract CN from verified CN Cert (Authentication is already done)
