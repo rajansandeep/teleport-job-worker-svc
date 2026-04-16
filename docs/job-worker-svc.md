@@ -20,8 +20,7 @@ The Teleport systems engineering challenge requires building a prototype job wor
 - Process lifecycle management (start, stop, query)
 - Efficient output streaming without polling. 
     - Support multiple concurrent clients and late-joiners
-- Process based job termination 
-    - Kills main process and all children in the group
+- Process based job termination
 - gRPC API with mTLS and certificate based authorization
 - Binary safe output handling
 
@@ -41,7 +40,7 @@ Three components with clear separation:
 
 ### Process execution
 
-For spawning services and running processes, the decision is to use `os.exec.Cmd` with `cmd.Stdout = Writer` and `cmd.StdErr = Writer`. 
+For spawning services and running processes, the decision is to use `os/exec.Cmd` with `cmd.Stdout = Writer` and `cmd.StdErr = Writer`. 
 
 As noted above, stdout and stderr are combined into a single stream. This simplifies the streaming infrastructure and also maps how `kubectl logs` behaves today.
 
@@ -110,8 +109,8 @@ type outputBuffer struct { /* sync.Mutex, sync.Cond, []byte, closed bool */ }
 // Write appends data and wakes all waiting readers
 func (b *outputBuffer) Write(p []byte) (int, error)
 
-// NewReader returns a new Reader starting at offset 0
-func (b *outputBuffer) NewReader() *Reader
+// NewReader returns a new io.ReadCloser starting at offset 0
+func (b *outputBuffer) NewReader() io.ReadCloser
 
 // Close marks the buffer as complete
 func (b *outputBuffer) Close()
@@ -174,7 +173,7 @@ type Worker struct { /* sync.RWMutex, map[string]*job */ }
 // Start creates a new job, executes the command, and returns the job ID
 func (w *Worker) Start(ctx context.Context, cmd string, args []string) (string, error)
 
-// Stop kills a running job and all its children
+// Stop kills a running job
 // Returns an error if the job is not in the Running state
 func (w *Worker) Stop(ctx context.Context, jobID string) error
 
@@ -369,7 +368,7 @@ This check runs on every RPC call and not just at connection establishment. Auth
 Both gRPC unary and stream interceptors are needed as `StreamOutput` uses the stream interceptor path, while Start/Stop/Status uses the unary path.
 
 The design described above is simple as serves its purpose. A dynamic auth (RBAC, OPA/ABAC) was not chosen as it adds complexity for the service. 
-Also, job record of the client who started the job is recorded, but all admins can stop the job. An owner-only stop is not added but can be added in the future. Similarly, viewers can view any job, even if they did not create it.
+All admins can stop the job. Similarly, viewers can view any job, even if they did not create it.
 
 **Role matrix:**
 
@@ -439,9 +438,7 @@ make certs
 ./jobworker-cli stop 550e8400-e29b-41d4-a716-446655440000
 
 # Viewer attempting to start (denied: charlie maps to the viewer role)
-./jobworker-cli \
-  JOBWORKER_CERT=certs/charlie.crt JOBWORKER_KEY=certs/charlie.key \
-  start -- echo hello
+JOBWORKER_CERT=certs/charlie.crt JOBWORKER_KEY=certs/charlie.key ./jobworker-cli start -- echo hello
 # error: permission denied: role "viewer" cannot call Start
 ```
 
