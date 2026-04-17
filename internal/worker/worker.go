@@ -19,6 +19,8 @@ import (
 // Remove API at this level.
 //
 // TODO: add a Remove/Purge method to release memory for completed jobs.
+// TODO: Add Close/Shutdown so callers can gracefully stop running jobs,
+// reject new ones, and release retained in-memory state.
 type Worker struct {
 	mu   sync.RWMutex
 	jobs map[string]*job
@@ -77,10 +79,6 @@ func NewWorker() *Worker {
 // Start launches cmd with args as a new background job and returns its ID.
 // The ID can be used with Stop, Status, and StreamOutput.
 //
-// The context argument is accepted but is not used to
-// govern the launched process's lifetime. A cancelled context after Start
-// returns has no effect on the running process. Use Stop to terminate a job.
-//
 // TODO: accept a per-job timeout or context to bound process lifetime
 // independently of any RPC context.
 func (w *Worker) Start(cmd string, args []string) (string, error) {
@@ -132,7 +130,9 @@ func (w *Worker) Start(cmd string, args []string) (string, error) {
 // transition.
 //
 // Returns ErrJobNotFound if jobID does not exist, or ErrJobNotRunning if
-// the job is not in the Running state.
+// the job is not in the Running state. If the OS process has already exited
+// but the job record has not yet been updated by the background waiter,
+// ErrJobNotRunning is also returned.
 func (w *Worker) Stop(jobID string) error {
 	j, err := w.getJob(jobID)
 	if err != nil {
@@ -147,21 +147,22 @@ func (w *Worker) Stop(jobID string) error {
 
 	j.stopRequested = true
 	pid := j.cmd.Process.Pid
-	j.mu.Unlock()
 
+	// Hold the lock across Kill so that waiter cannot observe stopRequested=true
+	// and read ProcessState before the signal is actually delivered, which would
+	// cause it to misclassify a natural exit as JobStateStopped.
 	err = syscall.Kill(-pid, syscall.SIGKILL)
 	switch {
 	case err == nil:
+		j.mu.Unlock()
 		return nil
 	case errors.Is(err, syscall.ESRCH):
 		// The process (or process group) is already gone. Clear stopRequested so
 		// the waiter classifies the terminal state based on the actual exit.
-		j.mu.Lock()
 		j.stopRequested = false
 		j.mu.Unlock()
 		return ErrJobNotRunning
 	default:
-		j.mu.Lock()
 		j.stopRequested = false
 		j.mu.Unlock()
 		return err
@@ -221,16 +222,27 @@ func (w *Worker) waiter(j *job) {
 		return
 	}
 
-	exitCode := 0
-	if j.cmd.ProcessState != nil {
-		exitCode = j.cmd.ProcessState.ExitCode()
+	if j.cmd.ProcessState == nil {
+		// ProcessState is nil when Wait returns an error before the process
+		// produced any exit status (e.g. OS resource exhaustion after Start).
+		j.state = JobStateFailed
+		j.exitCode = nil
+		j.errMsg = ""
+		if err != nil {
+			j.errMsg = err.Error()
+		}
+		return
 	}
+
+	exitCode := j.cmd.ProcessState.ExitCode()
 	j.exitCode = &exitCode
 
 	switch {
 	case exitCode != 0:
 		j.state = JobStateFailed
-	case errors.Is(err, exec.ErrWaitDelay):
+	case errors.Is(err, exec.ErrWaitDelay) && exitCode == 0:
+		// Process exited cleanly but a child it spawned kept the pipe open past
+		// WaitDelay. Treat as completed; errMsg records the detail.
 		j.state = JobStateCompleted
 	case err != nil:
 		j.state = JobStateFailed

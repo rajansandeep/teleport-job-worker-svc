@@ -144,7 +144,7 @@ func TestOutputBufferAllReadersGetFullOutput(t *testing.T) {
 		// done, which unblocks all readers with EOF.
 		outputs := make([]string, 3)
 		go func() {
-			for i := 1; i <= totalLines; i++ {
+			for range totalLines {
 				if _, err := b.Write([]byte("line\n")); err != nil {
 					t.Errorf("Write failed: %v", err)
 					return
@@ -163,7 +163,10 @@ func TestOutputBufferAllReadersGetFullOutput(t *testing.T) {
 			}()
 		}
 
-		// Wait for all goroutines to exit before checking results.
+		// synctest.Wait returns only after all goroutines in the bubble have
+		// exited or are durably blocked. All writes to outputs[i] happen before
+		// the goroutines exit, so reading outputs here is safe without a mutex
+		// under synctest's happens-before guarantee.
 		synctest.Wait()
 
 		for i, got := range outputs {
@@ -187,6 +190,8 @@ func TestOutputBufferCloseSemantics(t *testing.T) {
 
 	t.Run("MultipleClose", func(t *testing.T) {
 		b := newOutputBuffer()
+		// This subtest is assertless by design.
+		// It passes as long as calling Close twice does not panic.
 		b.Close()
 		b.Close()
 	})

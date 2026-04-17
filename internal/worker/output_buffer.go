@@ -22,7 +22,6 @@ type outputBuffer struct {
 func newOutputBuffer() *outputBuffer {
 	b := &outputBuffer{}
 	b.cond = sync.NewCond(&b.mu)
-
 	return b
 }
 
@@ -30,11 +29,12 @@ func (b *outputBuffer) Write(p []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	if b.closed {
-		return 0, io.ErrClosedPipe
-	}
 	if len(p) == 0 {
 		return 0, nil
+	}
+
+	if b.closed {
+		return 0, io.ErrClosedPipe
 	}
 
 	b.data = append(b.data, p...)
