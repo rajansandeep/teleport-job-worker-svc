@@ -5,6 +5,7 @@ import (
 	"time"
 )
 
+// JobState represents the lifecycle state of a job.
 type JobState int
 
 const (
@@ -39,14 +40,22 @@ func (s JobState) String() string {
 
 // JobInfo is a snapshot of a job's state, returned by Status.
 type JobInfo struct {
-	ID       string
-	Command  string
-	Args     []string
-	State    JobState
+	// ID is the unique identifier assigned when the job was started.
+	ID string
+	// Command is the executable path passed to Start.
+	Command string
+	// Args are the arguments passed to Start.
+	Args []string
+	// State is the current lifecycle state of the job.
+	State JobState
+	// ExitCode is the process exit code. Nil while the job is running or if
+	// it was stopped via Stop rather than exiting naturally.
 	ExitCode *int
 	// ErrMsg contains diagnostic information from the underlying Wait call.
 	// A non-empty ErrMsg does not imply failure.
-	ErrMsg     string
-	StartedAt  time.Time
+	ErrMsg string
+	// StartedAt is the time the process was launched.
+	StartedAt time.Time
+	// FinishedAt is the time the process exited. Zero while the job is running.
 	FinishedAt time.Time
 }

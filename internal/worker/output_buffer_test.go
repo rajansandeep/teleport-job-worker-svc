@@ -4,26 +4,10 @@ import (
 	"bytes"
 	"errors"
 	"io"
-	"sync"
+	"strings"
 	"testing"
-	"time"
+	"testing/synctest"
 )
-
-func waitGroupOrTimeout(t *testing.T, wg *sync.WaitGroup, timeout time.Duration) {
-	t.Helper()
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		wg.Wait()
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(timeout):
-		t.Fatal("timed out waiting for goroutines")
-	}
-}
 
 func TestOutputBufferEmptyWrite(t *testing.T) {
 	b := newOutputBuffer()
@@ -50,13 +34,11 @@ func TestOutputBufferEmptyWrite(t *testing.T) {
 func TestMultipleReadersAreIndependent(t *testing.T) {
 	b := newOutputBuffer()
 
-	var want bytes.Buffer
-	for range 10 {
-		want.WriteString("x\n")
-		if _, err := b.Write([]byte("x\n")); err != nil {
-			t.Fatalf("Write failed: %v", err)
-		}
+	data := bytes.Repeat([]byte("x\n"), 10)
+	if _, err := b.Write(data); err != nil {
+		t.Fatalf("Write failed: %v", err)
 	}
+	want := string(data)
 
 	r1 := b.NewReader()
 	r2 := b.NewReader()
@@ -71,11 +53,11 @@ func TestMultipleReadersAreIndependent(t *testing.T) {
 		t.Fatalf("ReadAll(r2) failed: %v", err)
 	}
 
-	if string(got1) != want.String() {
-		t.Fatalf("reader 1 mismatch: got %q want %q", got1, want.String())
+	if string(got1) != want {
+		t.Fatalf("reader 1 mismatch: got %q want %q", got1, want)
 	}
-	if string(got2) != want.String() {
-		t.Fatalf("reader 2 mismatch: got %q want %q", got2, want.String())
+	if string(got2) != want {
+		t.Fatalf("reader 2 mismatch: got %q want %q", got2, want)
 	}
 }
 
@@ -148,52 +130,48 @@ func TestBufferCloseReturnsEOFOnceDrained(t *testing.T) {
 }
 
 func TestOutputBufferAllReadersGetFullOutput(t *testing.T) {
-	b := newOutputBuffer()
+	synctest.Test(t, func(t *testing.T) {
+		b := newOutputBuffer()
 
-	const totalLines = 50
-	var want bytes.Buffer
-	for i := 1; i <= totalLines; i++ {
-		want.WriteString("line\n")
-	}
+		const totalLines = 50
+		want := strings.Repeat("line\n", totalLines)
 
-	r1 := b.NewReader()
-	r2 := b.NewReader()
-	r3 := b.NewReader()
+		r1 := b.NewReader()
+		r2 := b.NewReader()
+		r3 := b.NewReader()
 
-	var writeWg sync.WaitGroup
-	writeWg.Go(func() {
-		for i := 1; i <= totalLines; i++ {
-			if _, err := b.Write([]byte("line\n")); err != nil {
-				t.Errorf("Write failed: %v", err)
-				return
+		// Writer and readers run concurrently. The writer closes the buffer when
+		// done, which unblocks all readers with EOF.
+		outputs := make([]string, 3)
+		go func() {
+			for i := 1; i <= totalLines; i++ {
+				if _, err := b.Write([]byte("line\n")); err != nil {
+					t.Errorf("Write failed: %v", err)
+					return
+				}
 			}
-			time.Sleep(2 * time.Millisecond)
+			b.Close()
+		}()
+		for i, r := range []io.ReadCloser{r1, r2, r3} {
+			go func() {
+				got, err := io.ReadAll(r)
+				if err != nil {
+					t.Errorf("ReadAll reader %d failed: %v", i+1, err)
+					return
+				}
+				outputs[i] = string(got)
+			}()
 		}
-		b.Close()
+
+		// Wait for all goroutines to exit before checking results.
+		synctest.Wait()
+
+		for i, got := range outputs {
+			if got != want {
+				t.Fatalf("reader %d mismatch: got %d bytes want %d bytes", i+1, len(got), len(want))
+			}
+		}
 	})
-
-	// All three readers run concurrently with the writer and with each other.
-	outputs := make([]string, 3)
-	var readWg sync.WaitGroup
-	for i, r := range []io.ReadCloser{r1, r2, r3} {
-		readWg.Go(func() {
-			got, err := io.ReadAll(r)
-			if err != nil {
-				t.Errorf("ReadAll reader %d failed: %v", i+1, err)
-				return
-			}
-			outputs[i] = string(got)
-		})
-	}
-
-	waitGroupOrTimeout(t, &readWg, 3*time.Second)
-	waitGroupOrTimeout(t, &writeWg, 3*time.Second)
-
-	for i, got := range outputs {
-		if got != want.String() {
-			t.Fatalf("reader %d mismatch: got %d bytes want %d bytes", i+1, len(got), len(want.String()))
-		}
-	}
 }
 
 func TestOutputBufferCloseSemantics(t *testing.T) {
@@ -224,40 +202,33 @@ func TestReaderReadAfterReaderClose(t *testing.T) {
 
 	buf := make([]byte, 8)
 	n, err := r.Read(buf)
-	if n != 0 || err != io.EOF {
-		t.Fatalf("expected io.EOF after reader.Close, got n=%d err=%v", n, err)
+	if n != 0 || err != io.ErrClosedPipe {
+		t.Fatalf("expected io.ErrClosedPipe after reader.Close, got n=%d err=%v", n, err)
 	}
 }
 
 func TestReaderCloseUnblocksReadWithEOF(t *testing.T) {
-	b := newOutputBuffer()
-	r := b.NewReader()
+	synctest.Test(t, func(t *testing.T) {
+		b := newOutputBuffer()
+		r := b.NewReader()
 
-	done := make(chan error, 1)
-	go func() {
-		buf := make([]byte, 16)
-		_, err := r.Read(buf)
-		done <- err
-	}()
+		done := make(chan error, 1)
+		go func() {
+			buf := make([]byte, 16)
+			_, err := r.Read(buf)
+			done <- err
+		}()
 
-	// There is no way to know exactly when the goroutine has entered Read without
-	// adding hooks to the production code. In practice it blocks within
-	// microseconds, so a short sleep is enough to make the test reliable.
-	// TODO: for a more robust test, add an optional callback to reader that fires
-	// when cond.Wait is entered, so the test can synchronise on the actual blocked
-	// state instead of relying on timing.
-	time.Sleep(50 * time.Millisecond)
+		// Wait until all goroutines in the bubble are blocked — at this point
+		// the goroutine above is guaranteed to be inside cond.Wait.
+		synctest.Wait()
 
-	if err := r.Close(); err != nil {
-		t.Fatalf("Close failed: %v", err)
-	}
-
-	select {
-	case err := <-done:
-		if err != io.EOF {
-			t.Fatalf("expected io.EOF after reader Close, got %v", err)
+		if err := r.Close(); err != nil {
+			t.Fatalf("Close failed: %v", err)
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("blocked Read did not unblock after Close")
-	}
+
+		if err := <-done; err != io.ErrClosedPipe {
+			t.Fatalf("expected io.ErrClosedPipe after reader Close, got %v", err)
+		}
+	})
 }

@@ -1,7 +1,6 @@
 package worker
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -68,7 +67,7 @@ func (j *job) toInfo() JobInfo {
 	}
 }
 
-// NewWorker creates a new worker ready to accept jobs.
+// NewWorker creates a new Worker ready to accept jobs.
 func NewWorker() *Worker {
 	return &Worker{
 		jobs: make(map[string]*job),
@@ -84,7 +83,7 @@ func NewWorker() *Worker {
 //
 // TODO: accept a per-job timeout or context to bound process lifetime
 // independently of any RPC context.
-func (w *Worker) Start(_ context.Context, cmd string, args []string) (string, error) {
+func (w *Worker) Start(cmd string, args []string) (string, error) {
 	if strings.TrimSpace(cmd) == "" {
 		return "", ErrInvalidCommand
 	}
@@ -134,7 +133,7 @@ func (w *Worker) Start(_ context.Context, cmd string, args []string) (string, er
 //
 // Returns ErrJobNotFound if jobID does not exist, or ErrJobNotRunning if
 // the job is not in the Running state.
-func (w *Worker) Stop(_ context.Context, jobID string) error {
+func (w *Worker) Stop(jobID string) error {
 	j, err := w.getJob(jobID)
 	if err != nil {
 		return err
@@ -171,7 +170,7 @@ func (w *Worker) Stop(_ context.Context, jobID string) error {
 
 // Status returns a point-in-time snapshot of the job's state and metadata.
 // Returns ErrJobNotFound if jobID does not exist.
-func (w *Worker) Status(_ context.Context, jobID string) (JobInfo, error) {
+func (w *Worker) Status(jobID string) (JobInfo, error) {
 	j, err := w.getJob(jobID)
 	if err != nil {
 		return JobInfo{}, err
@@ -182,27 +181,20 @@ func (w *Worker) Status(_ context.Context, jobID string) (JobInfo, error) {
 
 // StreamOutput returns an io.ReadCloser that replays the job's combined
 // stdout+stderr from byte 0. Late callers receive a full replay of all output
-// produced since the job started. Read blocks until new output is available,
-// the job exits (io.EOF), or Close is called.
+// produced since the job started. Read blocks until new output is available
+// or the job exits, at which point it returns io.EOF. If the reader is closed
+// before the job finishes, Read returns io.ErrClosedPipe.
 //
-// Context cancellation automatically unblocks any in-flight Read and closes
-// the returned reader. The caller must still call Close when done to release
-// resources; doing so cancels any pending context callback so no goroutine
-// outlives the reader.
+// The caller owns the reader's lifetime and must call Close when done.
 //
 // Returns ErrJobNotFound if jobID does not exist.
-func (w *Worker) StreamOutput(ctx context.Context, jobID string) (io.ReadCloser, error) {
+func (w *Worker) StreamOutput(jobID string) (io.ReadCloser, error) {
 	j, err := w.getJob(jobID)
 	if err != nil {
 		return nil, err
 	}
 
-	rc := j.buffer.NewReader()
-	stop := context.AfterFunc(ctx, func() {
-		_ = rc.Close()
-	})
-
-	return &cancelOnCloseReader{ReadCloser: rc, stop: stop}, nil
+	return j.buffer.NewReader(), nil
 }
 
 func (w *Worker) waiter(j *job) {
@@ -210,14 +202,22 @@ func (w *Worker) waiter(j *job) {
 	finishedAt := time.Now()
 
 	j.mu.Lock()
+	defer j.buffer.Close()
+	defer j.mu.Unlock()
 
 	j.finishedAt = finishedAt
 
-	if j.stopRequested {
+	signaledByStop := false
+	if ps := j.cmd.ProcessState; ps != nil {
+		if ws, ok := ps.Sys().(syscall.WaitStatus); ok && ws.Signaled() && ws.Signal() == syscall.SIGKILL {
+			signaledByStop = true
+		}
+	}
+
+	if j.stopRequested && signaledByStop {
 		j.state = JobStateStopped
 		j.exitCode = nil
-		j.mu.Unlock()
-		j.buffer.Close()
+		j.errMsg = ""
 		return
 	}
 
@@ -229,7 +229,7 @@ func (w *Worker) waiter(j *job) {
 
 	switch {
 	case exitCode != 0:
-		j.state = JobStateStopped
+		j.state = JobStateFailed
 	case errors.Is(err, exec.ErrWaitDelay):
 		j.state = JobStateCompleted
 	case err != nil:
@@ -245,9 +245,6 @@ func (w *Worker) waiter(j *job) {
 	if err != nil {
 		j.errMsg = err.Error()
 	}
-
-	j.mu.Unlock()
-	j.buffer.Close()
 }
 
 func (w *Worker) getJob(jobID string) (*job, error) {
@@ -259,19 +256,6 @@ func (w *Worker) getJob(jobID string) (*job, error) {
 		return nil, ErrJobNotFound
 	}
 	return j, nil
-}
-
-// cancelOnCloseReader wraps an io.ReadCloser and cancels a pending
-// context.AfterFunc callback when the reader is explicitly closed before
-// ctx is done, preventing the AfterFunc goroutine from outliving the reader.
-type cancelOnCloseReader struct {
-	io.ReadCloser
-	stop func() bool // stops the pending context.AfterFunc callback
-}
-
-func (c *cancelOnCloseReader) Close() error {
-	c.stop()
-	return c.ReadCloser.Close()
 }
 
 func newJobID() (string, error) {

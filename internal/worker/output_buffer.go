@@ -75,7 +75,7 @@ func (r *reader) Read(p []byte) (int, error) {
 
 	for {
 		if r.closed {
-			return 0, io.EOF
+			return 0, io.ErrClosedPipe
 		}
 
 		if r.offset < len(b.data) {
