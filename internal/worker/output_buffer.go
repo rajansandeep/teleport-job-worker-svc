@@ -5,7 +5,7 @@ import (
 	"sync"
 )
 
-// outputBuffer is a write-once, multi-reader byte buffer. Writers append to a
+// outputBuffer is an append-only, multi-reader byte buffer. Writers append to a
 // single shared slice. Each reader maintains its own offset so late joiners
 // replay from byte 0. Blocked readers are woken via a condition variable when
 // new data arrives or the buffer is closed.

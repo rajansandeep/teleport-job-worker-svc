@@ -99,11 +99,10 @@ func (w *Worker) Start(cmd string, args []string) (string, error) {
 	command.Stdout = buffer
 	command.Stderr = buffer
 
+	startedAt := time.Now()
 	if err := command.Start(); err != nil {
 		return "", err
 	}
-
-	startedAt := time.Now()
 
 	j := &job{
 		id:        jobID,
