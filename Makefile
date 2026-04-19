@@ -25,7 +25,7 @@ build-server:
 .PHONY: test
 test:
 	go test -race ./...
-
+	
 .PHONY: build-cli
 build-cli:
 	go build -o ./jobworker-cli ./cmd/jobworker-cli
