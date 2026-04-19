@@ -1,0 +1,40 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+jobworker-server
+jobworker-cli
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of `go tool cover`
+*.out
+
+# Go workspace file
+go.work
+go.work.sum
+
+# Build cache
+dist/
+
+# Certificates and private keys
+certs/
+*.pem
+*.key
+*.crt
+*.csr
+*.srl
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
