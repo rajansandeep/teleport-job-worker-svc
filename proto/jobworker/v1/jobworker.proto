@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+package jobworker.v1;
+
+option go_package = "github.com/rajansandeep/teleport-job-worker-svc/gen/jobworker/v1;jobworkerv1";
+
+service JobWorker {
+  rpc Start(StartRequest) returns (StartResponse);
+  rpc Stop(StopRequest) returns (StopResponse);
+  rpc Status(StatusRequest) returns (StatusResponse);
+  rpc StreamOutput(StreamOutputRequest) returns (stream OutputChunk);
+}
+
+message StartRequest {
+  string command = 1;
+  repeated string args = 2;
+}
+
+message StartResponse {
+  string job_id = 1;
+}
+
+message StopRequest {
+  string job_id = 1;
+}
+
+message StopResponse {}
+
+message StatusRequest {
+  string job_id = 1;
+}
+
+message StatusResponse {
+  string job_id = 1;
+  string command = 2;
+  repeated string args = 3;
+  JobState state = 4;
+  optional int32 exit_code = 5;
+  string error = 6;
+  int64 started_at = 7;
+  int64 finished_at = 8;
+}
+
+enum JobState {
+  JOB_STATE_UNSPECIFIED = 0;
+  JOB_STATE_RUNNING = 1;
+  JOB_STATE_COMPLETED = 2;
+  JOB_STATE_FAILED = 3;
+  JOB_STATE_STOPPED = 4;
+}
+
+message StreamOutputRequest {
+  string job_id = 1;
+}
+
+message OutputChunk {
+  bytes data = 1;
+}
