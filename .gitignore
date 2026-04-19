@@ -4,8 +4,8 @@
 *.dll
 *.so
 *.dylib
-jobworker-server
-jobworker-cli
+/jobworker-server
+/jobworker-cli
 
 # Test binary, built with `go test -c`
 *.test
