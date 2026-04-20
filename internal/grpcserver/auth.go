@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"strings"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -146,10 +147,8 @@ func authorize(cn, fullMethod string) error {
 }
 
 func methodName(fullMethod string) string {
-	for i := len(fullMethod) - 1; i >= 0; i-- {
-		if fullMethod[i] == '/' {
-			return fullMethod[i+1:]
-		}
+	if i := strings.LastIndex(fullMethod, "/"); i >= 0 {
+		return fullMethod[i+1:]
 	}
 	return fullMethod
 }

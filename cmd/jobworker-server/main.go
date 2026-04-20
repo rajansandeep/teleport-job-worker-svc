@@ -60,25 +60,15 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	serveReturned := make(chan struct{})
-	defer close(serveReturned)
-
-	shutdownDone := make(chan struct{})
 	go func() {
-		defer close(shutdownDone)
-		select {
-		case <-ctx.Done():
-			log.Println("shutdown signal received; stopping server")
-			grpcSrv.GracefulStop()
-		case <-serveReturned:
-			// Serve returned on its own. Nothing to do.
-		}
+		<-ctx.Done()
+		log.Println("shutdown signal received; stopping server")
+		grpcSrv.GracefulStop()
 	}()
 
 	log.Printf("jobworker-server listening on %s", *listenAddr)
 	if err := grpcSrv.Serve(lis); err != nil {
 		log.Fatalf("serve gRPC: %v", err)
 	}
-	<-shutdownDone
 	log.Println("server stopped")
 }

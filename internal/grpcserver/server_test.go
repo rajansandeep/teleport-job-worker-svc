@@ -417,7 +417,7 @@ func TestStreamOutputSendErrorClosesReader(t *testing.T) {
 func TestStreamOutputCancellationStress(t *testing.T) {
 	const iterations = 100
 
-	for i := 0; i < iterations; i++ {
+	for i := range iterations {
 		func() {
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()

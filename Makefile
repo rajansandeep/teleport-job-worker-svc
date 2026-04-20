@@ -18,3 +18,7 @@ certs:
 .PHONY: build-server
 build-server:
 	go build -o ./jobworker-server ./cmd/jobworker-server
+
+.PHONY: test
+test:
+	go test -race ./...

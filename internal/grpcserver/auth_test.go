@@ -82,6 +82,9 @@ func TestAuthorize(t *testing.T) {
 		{"unknown/Stop", "nobody", "/jobworker.v1.JobWorker/Stop", true},
 		{"unknown/Status", "nobody", "/jobworker.v1.JobWorker/Status", true},
 		{"unknown/StreamOutput", "nobody", "/jobworker.v1.JobWorker/StreamOutput", true},
+		// known CN with an unrecognised method is blocked
+		{"admin/UnknownMethod", "admin", "/jobworker.v1.JobWorker/UnknownMethod", true},
+		{"viewer/UnknownMethod", "viewer", "/jobworker.v1.JobWorker/UnknownMethod", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
