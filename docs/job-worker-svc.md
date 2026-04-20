@@ -167,6 +167,8 @@ type job struct {
 It is the in-memory coordinator for all jobs started by the library. It stores jobs by ID (the worker creates a UUID for each job), starts and stops processes, tracks each job’s lifecycle as it moves from running to a terminal state, and returns read-only snapshots for status APIs.
 It also manages each job’s shared stdout/stderr buffer and gives every output consumer its own reader into that buffer. This means clients can stream output independently: a slow reader does not block other readers, and a client that joins late can still replay output from the beginning.
 
+For creating UUID, the `google/UUID` package will be used.
+
 ```go
 type Worker struct { /* sync.RWMutex, map[string]*job */ }
 
@@ -196,7 +198,7 @@ type JobInfo struct {
     Args       []string
     State      JobState    // Running, Completed, Failed, Stopped
     ExitCode   *int
-    Error      string
+    ErrMsg     string
     StartedAt  time.Time 
     FinishedAt time.Time
 }

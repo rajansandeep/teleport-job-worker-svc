@@ -123,15 +123,17 @@ func (w *Worker) Start(cmd string, args []string) (string, error) {
 	return jobID, nil
 }
 
-// Stop sends SIGKILL to the process group of the given job and returns
-// immediately. The job transitions to JobStateStopped asynchronously once
-// the OS confirms the process has exited. Poll Status to observe the
-// transition.
+// Stop sends SIGKILL to the job's process group and returns immediately.
+// Callers can use Status to observe the final state.
 //
-// Returns ErrJobNotFound if jobID does not exist, or ErrJobNotRunning if
-// the job is not in the Running state. If the OS process has already exited
-// but the job record has not yet been updated by the background waiter,
-// ErrJobNotRunning is also returned.
+// It returns ErrJobNotFound if the job does not exist. It returns
+// ErrJobNotRunning if the job has already finished, if another Stop call is
+// already in progress, or if the OS process group is already gone by the time
+// SIGKILL is sent.
+//
+// In a narrow race with natural process exit, Stop may return nil even though
+// the final state is later recorded as Completed or Failed instead of Stopped.
+// Status is the source of truth for the final outcome.
 func (w *Worker) Stop(jobID string) error {
 	j, err := w.getJob(jobID)
 	if err != nil {
