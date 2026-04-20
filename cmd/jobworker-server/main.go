@@ -51,12 +51,12 @@ func main() {
 
 	jobworkerv1.RegisterJobWorkerServer(grpcSrv, srv)
 
-	// Trigger graceful shutdown on SIGTERM or SIGINT. GracefulStop drains
-	// unary RPCs immediately, but a StreamOutput RPC streaming from a running
-	// job will block until the job exits or the client disconnects — so
-	// GracefulStop can hang indefinitely in that case. Use SIGKILL to force
-	// exit. Running jobs will also be orphaned until Worker.Shutdown is
-	// implemented (see TODO in worker.go).
+	// Shut down the server when SIGTERM or SIGINT is received.
+	// GracefulStop lets active RPCs finish, but a StreamOutput call can stay
+	// open as long as its job is still running or the client is still connected.
+	// That means shutdown can wait forever in that case. SIGKILL will still
+	// force the process to exit. Running jobs are not cleaned up yet because
+	// Worker.Shutdown is not implemented (see TODO in worker.go).
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 

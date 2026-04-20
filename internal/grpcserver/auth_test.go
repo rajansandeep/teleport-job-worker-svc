@@ -101,10 +101,10 @@ func TestMethodName(t *testing.T) {
 		want  string
 	}{
 		{"/jobworker.v1.JobWorker/Start", "Start"}, // normal full method path
-		{"Start", "Start"},                         // no slash — returns the input unchanged
+		{"Start", "Start"},                         // no slash: returns the input unchanged
 		{"", ""},                                   // empty string
 		{"/", ""},                                  // trailing slash only
-		{"/a/b/c", "c"},                            // multiple slashes — last segment wins
+		{"/a/b/c", "c"},                            // multiple slashes: last segment wins
 	}
 	for _, tc := range cases {
 		t.Run(tc.input, func(t *testing.T) {
