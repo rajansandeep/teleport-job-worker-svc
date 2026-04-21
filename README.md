@@ -220,7 +220,7 @@ Stop a running job. Sends SIGKILL to the process and its entire process group.
   stop 3f2e1d4c-8b9a-4f1e-a2b3-c4d5e6f70001
 ```
 
-The command returns as soon as the kill signal is sent. The job transitions to `Stopped` shortly after, once the OS confirms the process has exited. Use `status` to confirm:
+The command returns after the stop request is sent to the OS. The job transitions to `Stopped` shortly after, once the OS confirms the process has exited. Use `status` to confirm:
 
 ```bash
 ./jobworker-cli --cert certs/admin.crt --key certs/admin.key --ca certs/ca.crt \
@@ -289,7 +289,7 @@ Connecting with a certificate that has an unknown CN is rejected with a permissi
 |---|---|
 | `Running` | The process is active |
 | `Completed` | The process exited with code 0 |
-| `Failed` | The process exited with a non-zero code |
+| `Failed` | The process exited with a non-zero code, or terminated abnormally with no exit code available |
 | `Stopped` | The job was explicitly stopped via `stop` |
 
 Once a job reaches `Completed`, `Failed`, or `Stopped` it stays in that state. You can still call `status` and `stream` on a finished job.
@@ -303,7 +303,8 @@ This example walks through starting a job, watching its output live, and checkin
 **Terminal 1: start the server:**
 
 ```bash
-make certs build-server
+make certs 
+make build-server
 
 ./jobworker-server \
   --cert certs/server.crt \
@@ -365,3 +366,15 @@ JOB_ID=$(./jobworker-cli start -- sleep 300)
 # State:      Stopped
 # Exit Code:  -
 ```
+---
+
+## Limitations
+
+- **No persistence.** All job records and output are stored in memory and are lost when the server restarts.
+- **No output size limit.** The output buffer for each job grows without bound, so a very verbose job will consume proportional memory.
+- **No job ownership.** Any client with the right role can stop or stream any job, regardless of who started it.
+- **No cleanup on shutdown.** Running jobs are orphaned when the server stops; `Worker.Shutdown` is not yet implemented.
+- **SIGKILL only.** The `stop` command kills the process immediately with no opportunity for the job to clean up first.
+- **Single server.** There is no support for running jobs across multiple machines or distributing load.
+- **Hardcoded roles.** The `admin` and `viewer` roles are fixed in source code; changing permissions requires a code change.
+- **Shutdown can block.** If a client is actively streaming a long-running job, `GracefulStop` will wait until the job finishes or the client disconnects.
