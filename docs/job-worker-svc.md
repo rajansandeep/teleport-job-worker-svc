@@ -282,7 +282,7 @@ message StatusResponse {
   JobState state = 4;
 
   // A job's exit code. Meaningful only when state is COMPLETED or FAILED
-  int32 exit_code = 5;
+  optional int32 exit_code = 5;
 
   // Readable error messages
   string error = 6;         
