@@ -1,6 +1,9 @@
 MODULE := github.com/rajansandeep/teleport-job-worker-svc
 PROTO_DIR := proto
 
+.PHONY: all
+all: build-server build-cli certs
+
 .PHONY: proto
 proto:
 	protoc \
@@ -22,3 +25,11 @@ build-server:
 .PHONY: test
 test:
 	go test -race ./...
+
+.PHONY: build-cli
+build-cli:
+	go build -o ./jobworker-cli ./cmd/jobworker-cli
+
+.PHONY: e2e
+e2e: build-server build-cli certs
+	./scripts/e2e-all.sh
