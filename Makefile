@@ -22,13 +22,21 @@ certs:
 build-server:
 	go build -o ./jobworker-server ./cmd/jobworker-server
 
+.PHONY: build-cli
+build-cli:
+	go build -o ./jobworker-cli ./cmd/jobworker-cli
+
 .PHONY: test
 test:
 	go test -race ./...
 
-.PHONY: build-cli
-build-cli:
-	go build -o ./jobworker-cli ./cmd/jobworker-cli
+.PHONY: test-unit
+test-unit:
+	go test -race ./internal/...
+
+.PHONY: test-integration
+test-integration:
+	go test -race ./integration/...
 
 .PHONY: e2e
 e2e: build-server build-cli certs
